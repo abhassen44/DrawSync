@@ -11,24 +11,34 @@ import {
 // Initialize the Google Generative AI client
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
-// ==========================================================================
-// ## SECTION 1: CONFIGURATION                                             ##
-// ==========================================================================
+// --------------------------------------------
+// SECTION 1: Configuration
+// --------------------------------------------
 
 const systemInstruction = {
   role: "system",
   parts: [{
     text: `
-You are an expert SVG path generator. Your task is to generate a single SVG path string for a single, simple component.
+You are an expert SVG path generator.
 
-Core Rules:
-1.  **Output Format:** Your entire response must be ONLY the SVG path string (the 'd' attribute value). Do NOT include any other text, explanations, code blocks, or markdown.
-2.  **Canvas Size:** The shape must be designed to fit well within a 300x300 canvas.
-3.  **Positioning:** Strictly adhere to the requested position (e.g., "top left", "bottom center").
-4.  **Simplicity:** You are drawing one piece of a larger image. Focus only on the component described.
+Follow these rules:
+1. Respond ONLY with the SVG path string (the 'd' attribute). No markdown, no explanations.
+2. Design shapes to fit within a 300x300 canvas. Center them unless otherwise stated.
+3. Use appropriate SVG path commands (M, L, C, A, Z) to ensure smooth, clean, connected shapes.
+4. Respect the described size (small, medium, large) and position (top, bottom, center, etc).
+5. Use curves or arcs for round shapes when suitable.
+
+Do not include extra content—only return a valid SVG path string.
     `.trim()
   }]
 };
+
+const chatHistory: Content[] = [
+  { role: "user", parts: [{ text: "a simple five-pointed star" }] },
+  { role: "model", parts: [{ text: "M150,50 L180,120 L260,120 L200,170 L230,250 L150,200 L70,250 L100,170 L40,120 L120,120 Z" }] },
+  { role: "user", parts: [{ text: "a heart shape" }] },
+  { role: "model", parts: [{ text: "M150,95 C110,40 50,80 150,170 C250,80 190,40 150,95 Z" }] },
+];
 
 const safetySettings: SafetySetting[] = [
   { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE },
@@ -38,38 +48,36 @@ const safetySettings: SafetySetting[] = [
 ];
 
 const generationConfig: GenerationConfig = {
-  temperature: 0.3, // Lowered for more predictable component generation
+  temperature: 0.4,
   topK: 40,
   topP: 0.95,
   maxOutputTokens: 1024,
 };
 
-// ==========================================================================
-// ## SECTION 2: HELPER FUNCTIONS (PLANNER & COMPONENT WORKER)             ##
-// ==========================================================================
+// --------------------------------------------
+// SECTION 2: Helpers
+// --------------------------------------------
 
-/**
- * CALL 1: The Planner.
- * Generates a detailed JSON plan of all geometric components.
- */
-async function getDetailedDescription(simplePrompt: string): Promise<any | null> {
+async function getDetailedDescription(simplePrompt: string): Promise<string | null> {
   try {
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash",
+      model: "gemini-2.0-flash",
       generationConfig: { responseMimeType: "application/json" },
     });
 
     const plannerPrompt = `
-You are a geometry planner. Given a user prompt, return a JSON object containing an array of shapes that make up the drawing.
+You are a geometry planner. Given a user prompt, return a JSON array of shapes that make up the drawing.
 
 Rules:
-- Each object in the "components" array must have: "shape", "description", "position", and "size".
+- Each object must have: "shape", "description", "position", and "size"
 - Canvas size is 300x300.
 - Allowed shapes: circle, ellipse, rectangle, square, triangle, line, arc, path, star, polygon.
 - Output must be VALID JSON. Nothing else.
 
-Example Input: "a rocket"
-Example Output:
+Example:
+
+Input: "a rocket"
+Output:
 {
   "components": [
     { "shape": "rectangle", "description": "body of the rocket", "position": "center", "size": "large" },
@@ -84,43 +92,54 @@ Output:
     `.trim();
 
     const result = await model.generateContent(plannerPrompt);
-    // Parse the JSON here to return a usable object
-    return JSON.parse(result.response.text());
+    return result.response.text();
   } catch (error) {
     console.error("Planner error:", error);
     return null;
   }
 }
 
-/**
- * CALL 2: The Component Worker.
- * Generates an SVG path for a single, simple component from the plan.
- */
-async function generateSingleComponentPath(component: any): Promise<string | null> {
+function convertPlannerJsonToVisualHint(json: string): string {
+  try {
+    const parsed = JSON.parse(json);
+    if (!parsed.components) return "";
+
+    return parsed.components.map((c: any, i: number) =>
+      `Component ${i + 1}: a ${c.size || "medium"} ${c.shape}, at ${c.position || "center"}, described as: ${c.description}`
+    ).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+async function generateSVGPath(prompt: string): Promise<string | null> {
   try {
     const model = genAI.getGenerativeModel({
       model: "gemini-2.0-flash",
       systemInstruction: systemInstruction,
     });
-    
-    // Create a very focused prompt for one component
-    const workerPrompt = `Generate an SVG path for a ${component.size || 'medium'} ${component.shape} at the ${component.position || 'center'} of a 300x300 canvas. It is the ${component.description}.`;
 
-    const result = await model.generateContent(workerPrompt);
-    const path = result.response.text().trim();
-    
-    // Basic validation for a single path component
-    return /^[MLCZAmlcza0-9,\s.\-]+$/.test(path) ? path : null;
+    const chat = model.startChat({
+      history: chatHistory,
+      generationConfig,
+      safetySettings
+    });
 
+    const result = await chat.sendMessage(prompt);
+    return result.response.text().trim();
   } catch (error) {
-    console.error(`Worker error for component "${component.description}":`, error);
+    console.error("Worker error:", error);
     return null;
   }
 }
 
-// ==========================================================================
-// ## SECTION 3: API HANDLER                                               ##
-// ==========================================================================
+function isValidSVGPath(path: string): boolean {
+  return /^[MLCZAmlcza0-9,\s.\-]+$/.test(path.trim());
+}
+
+// --------------------------------------------
+// SECTION 3: API Handler
+// --------------------------------------------
 
 export async function POST(req: NextRequest) {
   try {
@@ -130,32 +149,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Prompt is required" }, { status: 400 });
     }
 
-    // Step 1: Get the structured JSON plan from the planner model.
-    const plan = await getDetailedDescription(initialPrompt);
-    if (!plan || !plan.components || plan.components.length === 0) {
-      return NextResponse.json({ error: "Failed to generate a valid plan" }, { status: 500 });
+    const detailedDescriptionJson = await getDetailedDescription(initialPrompt);
+    if (!detailedDescriptionJson) {
+      return NextResponse.json({ error: "Failed to generate detailed description" }, { status: 500 });
     }
 
-    // Step 2: Create an array of promises, one for each component path generation.
-    const componentPromises = plan.components.map((component: any) => 
-        generateSingleComponentPath(component)
-    );
+    const visualHint = convertPlannerJsonToVisualHint(detailedDescriptionJson);
 
-    // Step 3: Execute all component generation calls in parallel for efficiency.
-    const componentPaths = await Promise.all(componentPromises);
-
-    // Step 4: Filter out any failed generations and join the successful paths.
-    const finalSvgPath = componentPaths.filter(path => path !== null).join(" ");
-
-    if (!finalSvgPath) {
-      return NextResponse.json({ error: "Failed to generate any valid SVG components" }, { status: 500 });
+    // Optional prompt-based hint
+    let customHint = "";
+    if (initialPrompt.toLowerCase().includes("car")) {
+      customHint += "\nImportant: Represent the car using a rectangle (body), two circles (wheels), and a smaller rounded rectangle (roof).";
     }
 
-    // Step 5: Return the combined path.
-    return NextResponse.json({ svgPath: finalSvgPath }, { status: 200 });
+    const finalPrompt = `
+User's request: "${initialPrompt}"
+Detailed breakdown (JSON): ${detailedDescriptionJson}
 
+Visual guide:
+${visualHint}
+${customHint}
+    `.trim();
+
+    const svgPath = await generateSVGPath(finalPrompt);
+
+    if (!svgPath || !isValidSVGPath(svgPath)) {
+      return NextResponse.json({ error: "Invalid or missing SVG path output" }, { status: 500 });
+    }
+
+    return NextResponse.json({ svgPath }, { status: 200 });
   } catch (error) {
-    console.error("API Route Error:", error);
+    console.error("API Error:", error);
     return NextResponse.json({ error: "Internal Server Error" }, { status: 500 });
   }
 }
