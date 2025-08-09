@@ -7,7 +7,7 @@ import { Tool } from "@/Interfaces/IShape";
 import Logo from "./Logo";
 import UserInfo from "./UserInfo";
 import ToolbarStore from "@/lib/store/ToolbarStore";
-import { generateSVGShape } from "@/utils/api";
+import { generateSVGShape} from "@/utils/api";
 import toast from "react-hot-toast";
 // import { startVoiceRecognition } from "@/lib/speechToText"; // Voice API
 
@@ -128,9 +128,69 @@ export function Canvas({
     }
   };
 
-  const handleVoiceInput = async () => {
-    toast.success("This feature in under developement .stay tune..👍");
-  };
+  const getPromptFromVoice = (): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const SpeechRecognition =
+      window.SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      return reject(new Error("Voice recognition not supported."));
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    let transcript = "";
+    let lastSpeechTime = Date.now();
+    let silenceCheckTimer: NodeJS.Timeout;
+
+    toast("Listening...", { icon: "🎤" });
+    recognition.start();
+
+    // Whenever we get results
+    recognition.onresult = (event: SpeechRecognitionEvent) => {
+      const newTranscript = event.results[event.results.length - 1][0].transcript;
+      transcript += (transcript ? " " : "") + newTranscript.trim();
+      lastSpeechTime = Date.now(); // reset silence timer
+    };
+
+    // Check for silence every second
+    silenceCheckTimer = setInterval(() => {
+      if (Date.now() - lastSpeechTime > 4000) { // >4s silence
+        clearInterval(silenceCheckTimer);
+        recognition.stop();
+        resolve(transcript);
+      }
+    }, 1000);
+
+    recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
+      clearInterval(silenceCheckTimer);
+      const errorMsg =
+        event.error === "no-speech"
+          ? "No speech was detected."
+          : `Recognition error: ${event.error}`;
+      reject(new Error(errorMsg));
+    };
+
+    recognition.onend = () => {
+      clearInterval(silenceCheckTimer);
+    };
+  });
+};
+
+
+  // This function now returns a promise that resolves with the SVG path string
+const generateShapeFromVoice = async (position: { x: number; y: number }) => {
+  try {
+    const voicePrompt = await getPromptFromVoice();
+    await handleGenerateShape(voicePrompt, position);
+  } catch (error) {
+    toast.error((error as Error).message);
+    console.error("Voice recognition failed:", error);
+  }
+};
   const handleCancleGenerateShape = () => {
     setPrompt("");
     setShowPopup(false);
@@ -248,7 +308,7 @@ export function Canvas({
         <span className="absolute inset-x-0 -bottom-px bg-gradient-to-r from-transparent via-blue-500 to-transparent h-px w-3/4 mx-auto"></span>
         <span className="opacity-0 group-hover:opacity-100 transition-opacity duration-300 absolute inset-x-0 -bottom-px bg-gradient-to-r from-transparent via-blue-500 to-transparent h-[2px] w-full mx-auto blur-sm"></span>
         <button
-          onClick={handleVoiceInput}
+          onClick={() => generateShapeFromVoice({ x: 100, y: 100 })}
           className="fixed -right-16 bg-red-500 text-white p-3 rounded-full shadow-lg hover:bg-red-600"
         >
           <Mic size={24} />
